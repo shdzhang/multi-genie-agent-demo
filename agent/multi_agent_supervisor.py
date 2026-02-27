@@ -257,13 +257,8 @@ class MultiGenieAgentSupervisor(ResponsesAgent):
     """
 
     def _get_obo_client(self) -> WorkspaceClient:
-        from databricks_ai_bridge.utils.auth import ModelServingUserCredentials
+        return WorkspaceClient()
 
-        return WorkspaceClient(
-            credentials_strategy=ModelServingUserCredentials()
-        )
-
-    @mlflow.trace(span_type=SpanType.AGENT, name="multi_genie_supervisor")
     def predict(self, request: ResponsesAgentRequest) -> ResponsesAgentResponse:
         outputs = [
             event.item
@@ -274,7 +269,6 @@ class MultiGenieAgentSupervisor(ResponsesAgent):
             output=outputs, custom_outputs=request.custom_inputs
         )
 
-    @mlflow.trace(span_type=SpanType.AGENT, name="multi_genie_supervisor_stream")
     def predict_stream(
         self, request: ResponsesAgentRequest
     ) -> Generator[ResponsesAgentStreamEvent, None, None]:

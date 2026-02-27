@@ -44,8 +44,8 @@ cfg = mlflow.models.ModelConfig()
 SALES_GENIE_SPACE_ID = cfg.get("sales_genie_space_id")
 HR_GENIE_SPACE_ID = cfg.get("hr_genie_space_id")
 SUPPLY_CHAIN_GENIE_SPACE_ID = cfg.get("supply_chain_genie_space_id")
-LLM_ENDPOINT = cfg.get("llm_endpoint", "databricks-claude-sonnet-4-5")
-MAX_ITERATIONS = cfg.get("max_iterations", 3)
+LLM_ENDPOINT = cfg.get("llm_endpoint")
+MAX_ITERATIONS = cfg.get("max_iterations")
 
 # ---------------------------------------------------------------------------
 # Worker descriptions (used by the supervisor for routing)

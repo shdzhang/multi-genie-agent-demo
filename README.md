@@ -170,3 +170,94 @@ serialized_space = {
 ```python
 "tables": [{"identifier": t} for t in sorted(config["table_identifiers"])]
 ```
+
+### `ModelConfig.get() takes 2 positional arguments but 3 were given`
+
+**Symptom**: Agent fails to load during `mlflow.pyfunc.log_model` or at serving time.
+
+**Root cause**: `mlflow.models.ModelConfig.get()` only accepts a key name — it does not support a default-value argument.
+
+**Fix**: Remove the default argument and handle missing keys separately:
+
+```python
+# Before (broken):
+cfg.get("llm_endpoint", "databricks-meta-llama-3-3-70b-instruct")
+
+# After (fixed):
+cfg.get("llm_endpoint")
+```
+
+### `ModuleNotFoundError: No module named 'databricks_ai_bridge.utils.auth'`
+
+**Symptom**: Agent import fails at serving time when trying to use `ModelServingUserCredentials`.
+
+**Root cause**: With the `ResponsesAgent` interface and `auth_policy` configuration, OBO credentials are injected automatically. `WorkspaceClient()` auto-detects the credential type in the serving context — no manual credential strategy is needed.
+
+**Fix**: Replace explicit credential handling with a plain `WorkspaceClient()`:
+
+```python
+# Before (broken):
+from databricks_ai_bridge.utils.auth import ModelServingUserCredentials
+creds = ModelServingUserCredentials()
+return WorkspaceClient(credentials_strategy=creds)
+
+# After (fixed):
+return WorkspaceClient()
+```
+
+### `Invalid user API scope(s): genie, serving-endpoints`
+
+**Symptom**: `mlflow.pyfunc.log_model` rejects the `auth_policy` with invalid scope names.
+
+**Root cause**: API scope names are namespaced. The short forms `genie` and `serving-endpoints` are not valid.
+
+**Fix**: Use the fully-qualified scope names:
+
+```python
+# Before (broken):
+api_scopes=["genie", "serving-endpoints"]
+
+# After (fixed):
+api_scopes=["dashboards.genie", "serving.serving-endpoints"]
+```
+
+### `ValueError: Endpoint ... is currently updating`
+
+**Symptom**: `agents.deploy()` fails because the endpoint is still processing a previous deployment.
+
+**Root cause**: Re-running the job while the endpoint is mid-update causes a conflict. The deploy call does not wait for the previous update to finish.
+
+**Fix**: Poll the endpoint state before deploying and wait for `UPDATING` to clear:
+
+```python
+ep = w.serving_endpoints.get(ENDPOINT_NAME)
+while "UPDATING" in str(ep.state.config_update):
+    time.sleep(10)
+    ep = w.serving_endpoints.get(ENDPOINT_NAME)
+```
+
+### `Unable to get space ... Node with resource name does not exist`
+
+**Symptom**: Deployed endpoint returns `InternalError` / `BAD_REQUEST` when the agent tries to query a Genie space. The error mentions `Node with resource name Some(datarooms/<space_id>) does not exist`.
+
+**Root cause**: Genie spaces must be declared as `DatabricksGenieSpace` resources in the `auth_policy`'s `system_auth_policy.resources`. Without this, the serving runtime cannot resolve the Genie space resource for OBO token scoping, even if the correct `api_scopes` are set.
+
+**Fix**: Add all Genie spaces alongside the LLM endpoint in `system_auth_policy.resources`:
+
+```python
+from mlflow.models.resources import DatabricksServingEndpoint, DatabricksGenieSpace
+
+auth_policy = AuthPolicy(
+    system_auth_policy=SystemAuthPolicy(
+        resources=[
+            DatabricksServingEndpoint(endpoint_name=LLM_ENDPOINT),
+            DatabricksGenieSpace(genie_space_id=SALES_SPACE_ID),
+            DatabricksGenieSpace(genie_space_id=HR_SPACE_ID),
+            DatabricksGenieSpace(genie_space_id=SC_SPACE_ID),
+        ]
+    ),
+    user_auth_policy=UserAuthPolicy(
+        api_scopes=["dashboards.genie", "serving.serving-endpoints"]
+    ),
+)
+```

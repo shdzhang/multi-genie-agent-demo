@@ -290,19 +290,22 @@ class MultiGenieAgentSupervisor(ResponsesAgent):
         for _, events in graph.stream(
             {"messages": messages}, stream_mode=["updates"]
         ):
+            def _mid(m):
+                return getattr(m, "id", None) or id(m)
+
             new_msgs = [
                 msg
                 for v in events.values()
                 for msg in v.get("messages", [])
-                if msg.id not in seen_ids
+                if _mid(msg) not in seen_ids
             ]
 
             if first_message:
-                seen_ids.update(msg.id for msg in new_msgs[: len(messages)])
+                seen_ids.update(_mid(msg) for msg in new_msgs[: len(messages)])
                 new_msgs = new_msgs[len(messages) :]
                 first_message = False
             else:
-                seen_ids.update(msg.id for msg in new_msgs)
+                seen_ids.update(_mid(msg) for msg in new_msgs)
                 node_name = tuple(events.keys())[0]
                 yield ResponsesAgentStreamEvent(
                     type="response.output_item.done",

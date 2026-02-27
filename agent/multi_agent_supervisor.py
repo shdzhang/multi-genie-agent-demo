@@ -263,12 +263,29 @@ class MultiGenieAgentSupervisor(ResponsesAgent):
         return WorkspaceClient(credentials_strategy=ModelServingUserCredentials())
 
     def predict(self, request: ResponsesAgentRequest) -> ResponsesAgentResponse:
-        outputs = [
-            event.item
-            for event in self.predict_stream(request)
-            if event.type == "response.output_item.done"
-        ]
-        return ResponsesAgentResponse(output=outputs)
+        """Non-streaming: run graph to completion, return only the final answer."""
+        user_client = self._get_obo_client()
+        graph = build_graph(user_client)
+
+        messages = to_chat_completions_input(
+            [i.model_dump() for i in request.input]
+        )
+
+        result = graph.invoke({"messages": messages})
+
+        final_messages = result.get("messages", [])
+        answer = ""
+        if final_messages:
+            last = final_messages[-1]
+            answer = last.content if hasattr(last, "content") else str(last)
+
+        return ResponsesAgentResponse(
+            output=[
+                self.create_text_output_item(
+                    text=answer, id=f"msg_{uuid.uuid4().hex[:8]}"
+                )
+            ]
+        )
 
     def predict_stream(
         self, request: ResponsesAgentRequest

@@ -23,6 +23,7 @@ from mlflow.types.responses import (
     ResponsesAgentRequest,
     ResponsesAgentResponse,
     ResponsesAgentStreamEvent,
+    to_chat_completions_input,
 )
 
 from databricks.sdk import WorkspaceClient
@@ -262,40 +263,67 @@ class MultiGenieAgentSupervisor(ResponsesAgent):
         return WorkspaceClient(credentials_strategy=ModelServingUserCredentials())
 
     def predict(self, request: ResponsesAgentRequest) -> ResponsesAgentResponse:
-        user_client = self._get_obo_client()
-        graph = build_graph(user_client)
-
-        messages = []
-        for item in request.input:
-            if hasattr(item, "role") and hasattr(item, "content"):
-                messages.append({"role": item.role, "content": item.content})
-
-        result = graph.invoke({"messages": messages})
-
-        final_messages = result.get("messages", [])
-        answer = ""
-        if final_messages:
-            last = final_messages[-1]
-            answer = last.content if hasattr(last, "content") else str(last)
-
-        return ResponsesAgentResponse(
-            output=[
-                self.create_text_output_item(
-                    text=answer, id=f"msg_{uuid.uuid4().hex[:8]}"
-                )
-            ]
-        )
+        outputs = [
+            event.item
+            for event in self.predict_stream(request)
+            if event.type == "response.output_item.done"
+        ]
+        return ResponsesAgentResponse(output=outputs)
 
     def predict_stream(
         self, request: ResponsesAgentRequest
     ) -> Generator[ResponsesAgentStreamEvent, None, None]:
-        """Streaming version - delegates to non-streaming for simplicity."""
-        result = self.predict(request)
-        for item in result.output:
-            yield ResponsesAgentStreamEvent(
-                type="response.output_item.done",
-                item=item,
-            )
+        """
+        Stream graph execution, emitting agent-name annotations as each node
+        runs so the Playground shows live progress during long Genie calls.
+        """
+        user_client = self._get_obo_client()
+        graph = build_graph(user_client)
+
+        messages = to_chat_completions_input(
+            [i.model_dump() for i in request.input]
+        )
+
+        first_message = True
+        seen_ids = set()
+
+        for _, events in graph.stream(
+            {"messages": messages}, stream_mode=["updates"]
+        ):
+            new_msgs = [
+                msg
+                for v in events.values()
+                for msg in v.get("messages", [])
+                if msg.id not in seen_ids
+            ]
+
+            if first_message:
+                seen_ids.update(msg.id for msg in new_msgs[: len(messages)])
+                new_msgs = new_msgs[len(messages) :]
+                first_message = False
+            else:
+                seen_ids.update(msg.id for msg in new_msgs)
+                node_name = tuple(events.keys())[0]
+                yield ResponsesAgentStreamEvent(
+                    type="response.output_item.done",
+                    item=self.create_text_output_item(
+                        text=f"<name>{node_name}</name>",
+                        id=str(uuid.uuid4()),
+                    ),
+                )
+
+            for msg in new_msgs:
+                content = msg.content if hasattr(msg, "content") else str(msg)
+                if isinstance(content, list):
+                    import json
+                    content = json.dumps(content, indent=2)
+                if content:
+                    yield ResponsesAgentStreamEvent(
+                        type="response.output_item.done",
+                        item=self.create_text_output_item(
+                            text=content, id=str(uuid.uuid4()),
+                        ),
+                    )
 
 
 # ---------------------------------------------------------------------------

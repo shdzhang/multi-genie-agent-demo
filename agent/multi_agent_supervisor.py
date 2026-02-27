@@ -258,7 +258,8 @@ class MultiGenieAgentSupervisor(ResponsesAgent):
     """
 
     def _get_obo_client(self) -> WorkspaceClient:
-        return WorkspaceClient()
+        from databricks_ai_bridge import ModelServingUserCredentials
+        return WorkspaceClient(credentials_strategy=ModelServingUserCredentials())
 
     def predict(self, request: ResponsesAgentRequest) -> ResponsesAgentResponse:
         user_client = self._get_obo_client()

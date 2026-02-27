@@ -138,12 +138,6 @@ GENIE_CONFIGS = [
 
 host = w.config.host.rstrip("/")
 
-# #region agent log
-print(f"DEBUG[85b373] auth_type={w.config.auth_type}")
-print(f"DEBUG[85b373] token_present={w.config.token is not None}")
-print(f"DEBUG[85b373] token_repr={repr(w.config.token)[:30] if w.config.token else 'None'}")
-# #endregion
-
 
 def create_genie_space(config: dict) -> dict:
     """Create a Genie space using the SDK API client."""
@@ -152,7 +146,7 @@ def create_genie_space(config: dict) -> dict:
     serialized_space = {
         "version": 2,
         "data_sources": {
-            "tables": [{"identifier": t} for t in config["table_identifiers"]],
+            "tables": [{"identifier": t} for t in sorted(config["table_identifiers"])],
         },
         "config": {
             "sample_questions": [
@@ -168,10 +162,6 @@ def create_genie_space(config: dict) -> dict:
         "warehouse_id": WAREHOUSE_ID,
         "serialized_space": json.dumps(serialized_space),
     }
-
-    # #region agent log
-    print(f"DEBUG[85b373] payload={json.dumps(body, indent=2)[:500]}")
-    # #endregion
 
     try:
         result = w.api_client.do("POST", "/api/2.0/genie/spaces", body=body)

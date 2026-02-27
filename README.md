@@ -96,3 +96,86 @@ To adapt this demo for a different customer or use case:
 3. **Change worker descriptions**: Edit `WORKER_DESCRIPTIONS` in `agent/multi_agent_supervisor.py`
 4. **Change workspace**: Update `targets` in `databricks.yml`
 5. **Change LLM**: Update `llm_endpoint` variable in `databricks.yml`
+
+## Troubleshooting
+
+### `[CANNOT_MERGE_TYPE] Can not merge type 'DoubleType' and 'LongType'`
+
+**Symptom**: `spark.createDataFrame(rows)` fails when creating tables without an explicit schema.
+
+**Root cause**: Python's `min()` and `max()` preserve the type of whichever argument wins the comparison. When mixing int literals with float values, some rows get `int` and others get `float`:
+
+```python
+# These return int:
+max(0, -3.5)   # → 0 (int, because 0 > -3.5)
+min(100, 105.3) # → 100 (int, because 100 < 105.3)
+
+# These return float:
+max(0, 3.5)    # → 3.5 (float)
+min(100, 95.3) # → 95.3 (float)
+```
+
+Spark's schema inference sees `LongType` for some rows and `DoubleType` for others and refuses to merge them.
+
+**Fix**: Wrap the result in `float()` to ensure consistent typing, or provide an explicit `StructType` schema to `createDataFrame()`.
+
+```python
+# Before (broken):
+"value": round(min(100, max(0, random.gauss(50, 10))), 1)
+
+# After (fixed):
+"value": float(round(min(100, max(0, random.gauss(50, 10))), 1))
+```
+
+### `HTTP 401: Credential was not sent or was of an unsupported type`
+
+**Symptom**: REST API calls fail with 401 when running notebooks as a job, even though SDK calls like `w.warehouses.list()` work fine.
+
+**Root cause**: When a notebook runs as a Databricks job, `WorkspaceClient()` uses `runtime` authentication (implicit cluster auth). This auth type does not expose a raw token via `w.config.token` (it returns `None`). Manually constructing `Authorization: Bearer None` headers causes a 401.
+
+**Fix**: Use the SDK's built-in API client instead of manual HTTP requests. `w.api_client.do()` handles authentication correctly regardless of the auth method (PAT, OAuth, runtime).
+
+```python
+# Before (broken in job context):
+token = w.config.token
+req.add_header("Authorization", f"Bearer {token}")
+urllib.request.urlopen(req)
+
+# After (works everywhere):
+result = w.api_client.do("POST", "/api/2.0/genie/spaces", body=body)
+```
+
+### `Invalid serialized_space: Cannot find field: table_identifiers`
+
+**Symptom**: Genie Space creation API returns `InvalidParameterValue` rejecting the `serialized_space` payload.
+
+**Root cause**: The `serialized_space` JSON must follow the v2 `GenieSpaceExport` protobuf schema. The correct structure uses `data_sources.tables[].identifier`, not a top-level `table_identifiers` array.
+
+**Fix**: Use the correct v2 payload structure:
+
+```python
+serialized_space = {
+    "version": 2,
+    "data_sources": {
+        "tables": [{"identifier": t} for t in sorted(table_list)],
+    },
+    "config": {
+        "sample_questions": [
+            {"id": uuid.uuid4().hex, "question": [q]}
+            for q in questions
+        ],
+    },
+}
+```
+
+### `Invalid export proto: data_sources.tables must be sorted by identifier`
+
+**Symptom**: Genie Space creation fails even with the correct v2 payload structure.
+
+**Root cause**: The API requires `data_sources.tables` to be sorted alphabetically by the `identifier` field.
+
+**Fix**: Sort the table identifiers before building the payload:
+
+```python
+"tables": [{"identifier": t} for t in sorted(config["table_identifiers"])]
+```

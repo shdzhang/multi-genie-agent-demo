@@ -111,9 +111,9 @@ if EXPERIMENT_NAME:
 
 mlflow.set_registry_uri("databricks-uc")
 
-# Input example for model signature
+# Input example for ResponsesAgent (OpenAI Responses API format)
 input_example = {
-    "messages": [
+    "input": [
         {"role": "user", "content": "What was total revenue last quarter?"}
     ]
 }

@@ -8,31 +8,33 @@ LangGraph-based supervisor that routes queries to 3 domain-specific Genie spaces
 
 Uses OBO (on-behalf-of-user) authentication so each request runs with the
 calling user's credentials, enforcing Unity Catalog ACLs per-user.
+
+Implements the MLflow ResponsesAgent interface for OpenAI Responses API
+compatibility.
 """
 
 import functools
-from typing import Any, Generator, Literal, Optional
+from typing import Generator, Literal
 
 import mlflow
-from mlflow.types.agent import (
-    ChatAgentChunk,
-    ChatAgentMessage,
-    ChatAgentResponse,
-    ChatContext,
+from mlflow.pyfunc import ResponsesAgent
+from mlflow.types.responses import (
+    ResponsesAgentRequest,
+    ResponsesAgentResponse,
+    ResponsesAgentStreamEvent,
+    output_to_responses_items_stream,
+    to_chat_completions_input,
 )
-from mlflow.pyfunc import ChatAgent
 
 from databricks.sdk import WorkspaceClient
 from databricks_langchain import ChatDatabricks
 from databricks_langchain.genie import GenieAgent
 
-from langgraph.graph import END, StateGraph
-from langgraph.types import Command
+from langgraph.graph import END, MessagesState, StateGraph
 from langchain_core.runnables import RunnableLambda
 from pydantic import BaseModel
 
 from mlflow.entities import SpanType
-from mlflow.types.agent import ChatAgentState
 
 # ---------------------------------------------------------------------------
 # Configuration loaded from MLflow model config
@@ -83,7 +85,7 @@ Rules:
 # ---------------------------------------------------------------------------
 # Graph state
 # ---------------------------------------------------------------------------
-class SupervisorState(ChatAgentState):
+class SupervisorState(MessagesState):
     next_node: str = ""
     iteration_count: int = 0
 
@@ -94,10 +96,8 @@ class SupervisorState(ChatAgentState):
 def build_graph(user_client: WorkspaceClient) -> StateGraph:
     """Construct a LangGraph with OBO GenieAgent workers + supervisor."""
 
-    # LLM for supervisor routing
     llm = ChatDatabricks(endpoint=LLM_ENDPOINT)
 
-    # Create GenieAgent workers with the per-request OBO client
     sales_agent = GenieAgent(
         genie_space_id=SALES_GENIE_SPACE_ID,
         genie_agent_name="SalesAgent",
@@ -125,7 +125,6 @@ def build_graph(user_client: WorkspaceClient) -> StateGraph:
         "SupplyChainAgent": supply_chain_agent,
     }
 
-    # --- Routing model ----
     options = list(WORKER_DESCRIPTIONS.keys()) + ["FINISH"]
 
     class NextNode(BaseModel):
@@ -141,7 +140,6 @@ def build_graph(user_client: WorkspaceClient) -> StateGraph:
     )
     supervisor_chain = preprocessor | llm.with_structured_output(NextNode)
 
-    # --- Node functions ---
     def agent_node(state: dict, agent, name: str) -> dict:
         """Execute a GenieAgent worker and return its response."""
         result = agent.invoke({"messages": state["messages"]})
@@ -167,7 +165,6 @@ def build_graph(user_client: WorkspaceClient) -> StateGraph:
         result = supervisor_chain.invoke(state)
         next_node = result.next_node
 
-        # Prevent routing to the same agent consecutively
         if state.get("next_node") == next_node and next_node != "FINISH":
             return {"next_node": "FINISH", "iteration_count": count}
 
@@ -176,7 +173,6 @@ def build_graph(user_client: WorkspaceClient) -> StateGraph:
     @mlflow.trace(span_type=SpanType.AGENT, name="final_answer")
     def final_answer_node(state: dict) -> dict:
         """Synthesize a final answer from all worker responses."""
-        # Collect named worker messages
         worker_messages = [
             m for m in state["messages"]
             if isinstance(m, dict) and m.get("name") in WORKER_DESCRIPTIONS
@@ -192,10 +188,12 @@ def build_graph(user_client: WorkspaceClient) -> StateGraph:
                 ]
             }
 
-        # Build synthesis prompt
         worker_context = "\n\n".join(
             f"### {m['name']}:\n{m['content']}" for m in worker_messages
         )
+
+        user_question = state["messages"][0]
+        question_text = user_question.get("content", "") if isinstance(user_question, dict) else str(user_question)
 
         synthesis_prompt = [
             {
@@ -209,7 +207,7 @@ def build_graph(user_client: WorkspaceClient) -> StateGraph:
             },
             {
                 "role": "user",
-                "content": f"User question: {state['messages'][0].get('content', '') if isinstance(state['messages'][0], dict) else state['messages'][0]}\n\nAgent responses:\n{worker_context}",
+                "content": f"User question: {question_text}\n\nAgent responses:\n{worker_context}",
             },
         ]
 
@@ -220,10 +218,8 @@ def build_graph(user_client: WorkspaceClient) -> StateGraph:
             ]
         }
 
-    # --- Build graph ---
     workflow = StateGraph(SupervisorState)
 
-    # Add worker nodes
     for name, agent in agents.items():
         node_fn = functools.partial(agent_node, agent=agent, name=name)
         workflow.add_node(name, node_fn)
@@ -231,14 +227,11 @@ def build_graph(user_client: WorkspaceClient) -> StateGraph:
     workflow.add_node("supervisor", supervisor_node)
     workflow.add_node("final_answer", final_answer_node)
 
-    # Entry point
     workflow.set_entry_point("supervisor")
 
-    # Workers always report back to supervisor
     for name in agents:
         workflow.add_edge(name, "supervisor")
 
-    # Supervisor decides next step
     workflow.add_conditional_edges(
         "supervisor",
         lambda x: x["next_node"],
@@ -251,73 +244,52 @@ def build_graph(user_client: WorkspaceClient) -> StateGraph:
 
 
 # ---------------------------------------------------------------------------
-# ChatAgent wrapper with OBO
+# ResponsesAgent wrapper with OBO
 # ---------------------------------------------------------------------------
-class MultiGenieAgentSupervisor(ChatAgent):
+class MultiGenieAgentSupervisor(ResponsesAgent):
     """
-    ChatAgent that builds the LangGraph per-request using OBO credentials.
+    ResponsesAgent that builds the LangGraph per-request using OBO credentials.
 
     Key OBO pattern: GenieAgents are created inside predict(), NOT at module
     level, so each request gets the calling user's downscoped token.
+
+    Implements the OpenAI Responses API compatible interface.
     """
 
-    def predict(
-        self,
-        messages: list[ChatAgentMessage],
-        context: Optional[ChatContext] = None,
-        custom_inputs: Optional[dict[str, Any]] = None,
-    ) -> ChatAgentResponse:
-        # OBO: create a per-request WorkspaceClient with the calling user's credentials
+    def _get_obo_client(self) -> WorkspaceClient:
         from databricks_ai_bridge.utils.auth import ModelServingUserCredentials
 
-        user_client = WorkspaceClient(
+        return WorkspaceClient(
             credentials_strategy=ModelServingUserCredentials()
         )
 
-        # Build graph with OBO client
-        graph = build_graph(user_client)
+    @mlflow.trace(span_type=SpanType.AGENT, name="multi_genie_supervisor")
+    def predict(self, request: ResponsesAgentRequest) -> ResponsesAgentResponse:
+        outputs = [
+            event.item
+            for event in self.predict_stream(request)
+            if event.type == "response.output_item.done"
+        ]
+        return ResponsesAgentResponse(
+            output=outputs, custom_outputs=request.custom_inputs
+        )
 
-        # Execute
-        request = {
-            "messages": [m.model_dump_compat(exclude_none=True) for m in messages]
-        }
-
-        result_messages = []
-        for event in graph.stream(request, stream_mode="updates"):
-            for node_data in event.values():
-                result_messages.extend(
-                    ChatAgentMessage(**msg)
-                    for msg in node_data.get("messages", [])
-                )
-
-        return ChatAgentResponse(messages=result_messages)
-
+    @mlflow.trace(span_type=SpanType.AGENT, name="multi_genie_supervisor_stream")
     def predict_stream(
-        self,
-        messages: list[ChatAgentMessage],
-        context: Optional[ChatContext] = None,
-        custom_inputs: Optional[dict[str, Any]] = None,
-    ) -> Generator[ChatAgentChunk, None, None]:
-        # OBO: create a per-request WorkspaceClient with the calling user's credentials
-        from databricks_ai_bridge.utils.auth import ModelServingUserCredentials
-
-        user_client = WorkspaceClient(
-            credentials_strategy=ModelServingUserCredentials()
-        )
-
-        # Build graph with OBO client
+        self, request: ResponsesAgentRequest
+    ) -> Generator[ResponsesAgentStreamEvent, None, None]:
+        user_client = self._get_obo_client()
         graph = build_graph(user_client)
 
-        request = {
-            "messages": [m.model_dump_compat(exclude_none=True) for m in messages]
-        }
+        cc_msgs = to_chat_completions_input([i.model_dump() for i in request.input])
 
-        for event in graph.stream(request, stream_mode="updates"):
-            for node_data in event.values():
-                yield from (
-                    ChatAgentChunk(**{"delta": msg})
-                    for msg in node_data.get("messages", [])
-                )
+        for _, events in graph.stream(
+            {"messages": cc_msgs}, stream_mode=["updates"]
+        ):
+            for node_data in events.values():
+                msgs = node_data.get("messages", [])
+                if msgs:
+                    yield from output_to_responses_items_stream(msgs)
 
 
 # ---------------------------------------------------------------------------

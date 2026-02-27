@@ -126,7 +126,7 @@ auth_policy = AuthPolicy(
         ]
     ),
     user_auth_policy=UserAuthPolicy(
-        api_scopes=["genie", "serving-endpoints"]
+        api_scopes=["dashboards.genie", "serving.serving-endpoints"]
     ),
 )
 

@@ -172,10 +172,12 @@ def build_graph(user_client: WorkspaceClient) -> StateGraph:
     @mlflow.trace(span_type=SpanType.AGENT, name="final_answer")
     def final_answer_node(state: dict) -> dict:
         """Synthesize a final answer from all worker responses."""
-        worker_messages = [
-            m for m in state["messages"]
-            if isinstance(m, dict) and m.get("name") in WORKER_DESCRIPTIONS
-        ]
+        worker_messages = []
+        for m in state["messages"]:
+            name = m.get("name") if isinstance(m, dict) else getattr(m, "name", None)
+            content = m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")
+            if name and name in WORKER_DESCRIPTIONS:
+                worker_messages.append({"name": name, "content": content})
 
         if not worker_messages:
             return {
@@ -191,8 +193,8 @@ def build_graph(user_client: WorkspaceClient) -> StateGraph:
             f"### {m['name']}:\n{m['content']}" for m in worker_messages
         )
 
-        user_question = state["messages"][0]
-        question_text = user_question.get("content", "") if isinstance(user_question, dict) else str(user_question)
+        first_msg = state["messages"][0]
+        question_text = first_msg.get("content", "") if isinstance(first_msg, dict) else getattr(first_msg, "content", str(first_msg))
 
         synthesis_prompt = [
             {

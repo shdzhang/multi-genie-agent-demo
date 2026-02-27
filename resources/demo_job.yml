@@ -1,9 +1,28 @@
 resources:
   jobs:
-    agent_build_deploy:
-      name: "[${bundle.target}] Multi-Genie Demo - Build & Deploy Agent"
+    demo:
+      name: "[${bundle.target}] Multi-Genie Demo - End to End"
       tasks:
+        - task_key: generate_data
+          notebook_task:
+            notebook_path: ../notebooks/01_setup_data.py
+            base_parameters:
+              catalog_name: ${var.catalog_name}
+              schema_name: ${var.schema_name}
+
+        - task_key: create_genie_spaces
+          depends_on:
+            - task_key: generate_data
+          notebook_task:
+            notebook_path: ../notebooks/02_create_genie_spaces.py
+            base_parameters:
+              catalog_name: ${var.catalog_name}
+              schema_name: ${var.schema_name}
+              warehouse_id: ${var.warehouse_id}
+
         - task_key: build_agent
+          depends_on:
+            - task_key: create_genie_spaces
           notebook_task:
             notebook_path: ../notebooks/03_agent_build.py
             base_parameters:

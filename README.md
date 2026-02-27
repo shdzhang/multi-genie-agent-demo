@@ -55,16 +55,8 @@ This demo uses **OBO (on-behalf-of-user)** rather than a shared PAT:
 # 1. Deploy the bundle
 databricks bundle deploy -t dev
 
-# 2. Generate data + create Genie spaces
-databricks bundle run setup -t dev
-
-# 3. Verify Genie spaces work in the UI
-
-# 4. Build + deploy agent
-databricks bundle run agent_build_deploy -t dev
-
-# 5. Test the endpoint
-databricks bundle run agent_build_deploy -t dev  # runs test_evaluate task
+# 2. Run the full end-to-end pipeline (data → Genie spaces → agent → deploy → test)
+databricks bundle run demo -t dev
 ```
 
 ## Project Structure
@@ -74,8 +66,7 @@ multi-genie-agent-demo/
 ├── databricks.yml                    # Bundle config (variables, targets)
 ├── resources/
 │   ├── model_artifacts.yml           # Schema, registered model, experiment
-│   ├── setup_job.yml                 # Job: data gen + Genie creation
-│   └── agent_job.yml                 # Job: agent build + deploy + test
+│   └── demo_job.yml                  # Single job: data → Genie → agent → deploy → test
 ├── notebooks/
 │   ├── 01_setup_data.py              # Create catalog/schema, generate 12 tables
 │   ├── 02_create_genie_spaces.py     # Create 3 Genie spaces via REST API

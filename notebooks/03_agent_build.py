@@ -32,9 +32,14 @@ print(f"LLM Endpoint: {LLM_ENDPOINT}")
 # MAGIC %md
 # MAGIC ## Retrieve Genie Space IDs
 # MAGIC
-# MAGIC Get space IDs from the setup job's task values, or set them manually.
+# MAGIC Gets space IDs from the create_genie_spaces task in this job,
+# MAGIC or falls back to looking them up by title via the REST API.
 
 # COMMAND ----------
+
+from databricks.sdk import WorkspaceClient
+
+w = WorkspaceClient()
 
 try:
     SALES_SPACE_ID = dbutils.jobs.taskValues.get(
@@ -46,15 +51,25 @@ try:
     SC_SPACE_ID = dbutils.jobs.taskValues.get(
         taskKey="create_genie_spaces", key="supply_chain_genie_space_id"
     )
-    print(f"Sales Genie Space: {SALES_SPACE_ID}")
-    print(f"HR Genie Space: {HR_SPACE_ID}")
-    print(f"Supply Chain Genie Space: {SC_SPACE_ID}")
-except Exception as e:
-    print(f"Could not retrieve task values ({e}). Set space IDs manually below:")
-    # SALES_SPACE_ID = "<your-sales-space-id>"
-    # HR_SPACE_ID = "<your-hr-space-id>"
-    # SC_SPACE_ID = "<your-supply-chain-space-id>"
-    raise
+    print("Retrieved space IDs from task values")
+except Exception:
+    print("Task values not available, looking up spaces by title...")
+    result = w.api_client.do("GET", "/api/2.0/genie/spaces")
+    spaces = result.get("spaces", [])
+    title_to_id = {s["title"]: s["space_id"] for s in spaces if "title" in s and "space_id" in s}
+
+    EXPECTED = ["Sales & Revenue Analytics", "HR & People Analytics", "Supply Chain & Operations"]
+    missing = [t for t in EXPECTED if t not in title_to_id]
+    if missing:
+        raise RuntimeError(f"Genie spaces not found: {missing}. Run the setup tasks first.")
+
+    SALES_SPACE_ID = title_to_id["Sales & Revenue Analytics"]
+    HR_SPACE_ID = title_to_id["HR & People Analytics"]
+    SC_SPACE_ID = title_to_id["Supply Chain & Operations"]
+
+print(f"Sales Genie Space: {SALES_SPACE_ID}")
+print(f"HR Genie Space: {HR_SPACE_ID}")
+print(f"Supply Chain Genie Space: {SC_SPACE_ID}")
 
 # COMMAND ----------
 

@@ -103,7 +103,7 @@ from mlflow.models.auth_policy import (
     SystemAuthPolicy,
     UserAuthPolicy,
 )
-from mlflow.models.resources import DatabricksServingEndpoint
+from mlflow.models.resources import DatabricksServingEndpoint, DatabricksGenieSpace
 
 # Set experiment
 if EXPERIMENT_NAME:
@@ -118,11 +118,14 @@ input_example = {
     ]
 }
 
-# OBO AuthPolicy - the key difference from PAT-based approach
+# OBO AuthPolicy: declare all resources the agent needs access to
 auth_policy = AuthPolicy(
     system_auth_policy=SystemAuthPolicy(
         resources=[
             DatabricksServingEndpoint(endpoint_name=LLM_ENDPOINT),
+            DatabricksGenieSpace(genie_space_id=SALES_SPACE_ID),
+            DatabricksGenieSpace(genie_space_id=HR_SPACE_ID),
+            DatabricksGenieSpace(genie_space_id=SC_SPACE_ID),
         ]
     ),
     user_auth_policy=UserAuthPolicy(

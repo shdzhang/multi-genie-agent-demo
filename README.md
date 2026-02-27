@@ -349,3 +349,45 @@ for m in state["messages"]:
     if name and name in WORKER_DESCRIPTIONS:
         worker_messages.append({"name": name, "content": content})
 ```
+
+### Genie agents return "permission restrictions" despite user having access
+
+**Symptom**: The agent returns apology messages about "permission restrictions" or "data access issues" even though the user owns the tables and the Genie spaces work correctly when queried directly in the UI.
+
+**Root cause**: `WorkspaceClient()` without a `credentials_strategy` uses the endpoint's **system service principal**, not the calling user's OBO token. The service principal typically lacks `SELECT` on the data tables. To use the user's identity, you must explicitly pass `ModelServingUserCredentials()`.
+
+**Fix**: Use `ModelServingUserCredentials` from `databricks_ai_bridge`:
+
+```python
+from databricks_ai_bridge import ModelServingUserCredentials
+
+# Before (uses service principal - no table access):
+user_client = WorkspaceClient()
+
+# After (uses calling user's OBO token):
+user_client = WorkspaceClient(credentials_strategy=ModelServingUserCredentials())
+```
+
+This must be called inside `predict()` / `predict_stream()`, not at module level, because OBO credentials are only available during request handling.
+
+### Traces appear under notebook experiment instead of shared experiment
+
+**Symptom**: MLflow traces from test runs appear under the notebook's auto-experiment (e.g., `.bundle/.../04_deploy_agent`) instead of the shared project experiment.
+
+**Root cause**: Each Databricks notebook gets an auto-experiment by default. Unless you explicitly call `mlflow.set_experiment()` before any MLflow operations, all traces and runs go to the notebook's auto-experiment.
+
+**Fix**: Pass the shared `experiment_name` variable to all notebooks via the job config and call `mlflow.set_experiment()` early in each notebook:
+
+```python
+# In each notebook, before any mlflow operations:
+EXPERIMENT_NAME = dbutils.widgets.get("experiment_name")
+if EXPERIMENT_NAME:
+    mlflow.set_experiment(EXPERIMENT_NAME)
+```
+
+In `demo_job.yml`, pass the variable to every task:
+
+```yaml
+base_parameters:
+  experiment_name: ${var.experiment_name}
+```

@@ -81,27 +81,33 @@ def _wait_for_endpoint_ready(w, name, timeout_minutes=15):
 
 existing_ep = _wait_for_endpoint_ready(w, ENDPOINT_NAME)
 
+already_serving = False
 if existing_ep is not None:
-    current_model = None
+    current_entity = current_version = None
     if existing_ep.config and existing_ep.config.served_entities:
         se = existing_ep.config.served_entities[0]
-        current_model = f"{se.entity_name} v{se.entity_version}"
-    print(f"Endpoint '{ENDPOINT_NAME}' already exists (serving {current_model}).")
-    print(f"Updating to {UC_MODEL_NAME} v{MODEL_VERSION} ...")
+        current_entity = se.entity_name
+        current_version = se.entity_version
+    print(f"Endpoint '{ENDPOINT_NAME}' already exists (serving {current_entity} v{current_version}).")
+    if current_entity == UC_MODEL_NAME and str(current_version) == str(MODEL_VERSION):
+        print(f"Already serving the target model+version. Skipping deploy.")
+        already_serving = True
+    else:
+        print(f"Updating to {UC_MODEL_NAME} v{MODEL_VERSION} ...")
 else:
     print(f"Endpoint '{ENDPOINT_NAME}' does not exist. Creating with {UC_MODEL_NAME} v{MODEL_VERSION} ...")
 
-deployment = agents.deploy(
-    UC_MODEL_NAME,
-    MODEL_VERSION,
-    endpoint_name=ENDPOINT_NAME,
-    tags={"endpointSource": "playground", "demo": "multi-genie-agent"},
-    deploy_feedback_model=True,
-)
-
-action = "Updated" if existing_ep else "Created"
-print(f"{action} endpoint: {ENDPOINT_NAME}")
-print(f"Model: {UC_MODEL_NAME} v{MODEL_VERSION}")
+if not already_serving:
+    deployment = agents.deploy(
+        UC_MODEL_NAME,
+        MODEL_VERSION,
+        endpoint_name=ENDPOINT_NAME,
+        tags={"endpointSource": "playground", "demo": "multi-genie-agent"},
+        deploy_feedback_model=False,
+    )
+    action = "Updated" if existing_ep else "Created"
+    print(f"{action} endpoint: {ENDPOINT_NAME}")
+    print(f"Model: {UC_MODEL_NAME} v{MODEL_VERSION}")
 
 # COMMAND ----------
 

@@ -261,3 +261,91 @@ auth_policy = AuthPolicy(
     ),
 )
 ```
+
+### Endpoint state check stuck in infinite loop (`NOT_UPDATING` contains `UPDATING`)
+
+**Symptom**: The deploy notebook hangs forever waiting for the endpoint to finish updating, even though the UI shows the endpoint is Ready.
+
+**Root cause**: `str(state.config_update)` returns `"NOT_UPDATING"` when the endpoint is idle. The check `"UPDATING" in "NOT_UPDATING"` is `True` (substring match), so the wait loop never exits.
+
+**Fix**: Check for `"IN_PROGRESS"` instead, which only matches when an update is actually happening:
+
+```python
+# Before (broken - matches NOT_UPDATING too):
+"UPDATING" in str(state.config_update)
+
+# After (fixed):
+"IN_PROGRESS" in str(state.config_update)
+```
+
+### `ValueError: Endpoint already serves model ... version N`
+
+**Symptom**: `agents.deploy()` fails when re-running the job because the endpoint already has the same model+version deployed.
+
+**Root cause**: `agents.deploy()` does not accept a no-op update — it raises an error if the endpoint already serves the exact same model and version.
+
+**Fix**: Check the currently served entity before calling `agents.deploy()` and skip if it matches:
+
+```python
+if existing_ep.config and existing_ep.config.served_entities:
+    se = existing_ep.config.served_entities[0]
+    if se.entity_name == UC_MODEL_NAME and str(se.entity_version) == str(MODEL_VERSION):
+        print("Already serving target version. Skipping deploy.")
+        already_serving = True
+```
+
+### `AttributeError: module 'mlflow' has no attribute 'deployments'`
+
+**Symptom**: Smoke test fails with `mlflow.deployments.predict()`.
+
+**Root cause**: `mlflow.deployments` is not available in all environments. The Databricks SDK provides a direct way to query serving endpoints.
+
+**Fix**: Use `w.api_client.do()` to query the endpoint:
+
+```python
+result = w.api_client.do(
+    "POST",
+    f"/serving-endpoints/{ENDPOINT_NAME}/invocations",
+    body={"input": [{"role": "user", "content": "test question"}]},
+)
+```
+
+### ResponsesAgent returns empty `output: []`
+
+**Symptom**: Endpoint returns `{"object":"response","output":[],"id":"..."}` with no content. The Playground shows "Received an invalid and unexpected value from the API: undefined".
+
+**Root cause**: The `predict_stream` method used `output_to_responses_items_stream(msgs)` to convert LangGraph messages to Responses API events. This function could not handle plain dict messages from LangGraph nodes, so it yielded zero events. The `predict` method collected nothing.
+
+**Fix**: Follow the `ResponsesAgent` pattern — run `graph.invoke()` to completion in `predict`, extract the final answer, and use `self.create_text_output_item()`:
+
+```python
+def predict(self, request):
+    result = graph.invoke({"messages": messages})
+    last = result["messages"][-1]
+    answer = last.content if hasattr(last, "content") else str(last)
+    return ResponsesAgentResponse(
+        output=[self.create_text_output_item(text=answer, id=f"msg_{uuid.uuid4().hex[:8]}")]
+    )
+
+def predict_stream(self, request):
+    result = self.predict(request)
+    for item in result.output:
+        yield ResponsesAgentStreamEvent(type="response.output_item.done", item=item)
+```
+
+### All responses return "I wasn't able to find the relevant information"
+
+**Symptom**: The agent runs without errors but every query gets the fallback response, regardless of domain.
+
+**Root cause**: LangGraph's `MessagesState` reducer automatically converts the plain dicts returned by `agent_node` (e.g., `{"role": "assistant", "content": "...", "name": "SalesAgent"}`) into LangChain `AIMessage` objects. The `final_answer_node` filtered with `isinstance(m, dict)`, which always returned `False` for `AIMessage` objects. So `worker_messages` was always empty.
+
+**Fix**: Handle both dicts and LangChain message objects using `getattr` fallback:
+
+```python
+worker_messages = []
+for m in state["messages"]:
+    name = m.get("name") if isinstance(m, dict) else getattr(m, "name", None)
+    content = m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")
+    if name and name in WORKER_DESCRIPTIONS:
+        worker_messages.append({"name": name, "content": content})
+```

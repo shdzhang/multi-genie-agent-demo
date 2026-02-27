@@ -1,0 +1,17 @@
+resources:
+  schemas:
+    demo_schema:
+      catalog_name: ${var.catalog_name}
+      name: ${var.schema_name}
+      comment: "Multi-Genie Agent Demo - synthetic data for Sales, HR, and Supply Chain domains"
+
+  registered_models:
+    multi_genie_supervisor:
+      catalog_name: ${var.catalog_name}
+      schema_name: ${var.schema_name}
+      name: ${var.model_name}
+      comment: "Multi-Genie supervisor agent with OBO authentication"
+
+  experiments:
+    multi_genie_experiment:
+      name: ${var.experiment_name}

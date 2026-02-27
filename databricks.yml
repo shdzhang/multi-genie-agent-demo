@@ -1,0 +1,47 @@
+bundle:
+  name: "multi-genie-agent-demo"
+
+include:
+  - resources/*.yml
+
+variables:
+  catalog_name:
+    description: "UC catalog for this project"
+    default: "shidong_catalog"
+
+  schema_name:
+    description: "UC schema for this project"
+    default: "multi_genie_demo"
+
+  warehouse_id:
+    description: "SQL warehouse ID for Genie spaces"
+    default: ""
+
+  llm_endpoint:
+    description: "Foundation model endpoint for the supervisor LLM"
+    default: "databricks-claude-sonnet-4-5"
+
+  model_name:
+    description: "Name of the registered model in UC"
+    default: "multi_genie_supervisor"
+
+  experiment_name:
+    description: "MLflow experiment name"
+    default: "/Users/${workspace.current_user.userName}/${bundle.target}_${var.model_name}"
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://416411475796958.8.gcp.databricks.com/
+
+  staging:
+    workspace:
+      host: https://416411475796958.8.gcp.databricks.com/
+
+  prod:
+    mode: production
+    workspace:
+      host: https://416411475796958.8.gcp.databricks.com/
+      root_path: /Workspace/Users/shidong.zhang@databricks.com/.bundle/${bundle.name}/${bundle.target}

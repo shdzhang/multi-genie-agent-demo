@@ -1,8 +1,8 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # 02 - Create Genie Spaces
+# MAGIC # 02 - Create or Update Genie Spaces
 # MAGIC
-# MAGIC Creates 3 Genie spaces via the Databricks SDK:
+# MAGIC Creates or updates 3 Genie spaces via the Databricks SDK (idempotent, safe to re-run):
 # MAGIC 1. Sales & Revenue Analytics
 # MAGIC 2. HR & People Analytics
 # MAGIC 3. Supply Chain & Operations
@@ -130,20 +130,21 @@ GENIE_CONFIGS = [
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Create Genie Spaces via REST API
+# MAGIC ## Create or Update Genie Spaces via REST API
 # MAGIC
-# MAGIC Uses the Genie REST API to create spaces with table identifiers and sample questions.
+# MAGIC Lists existing spaces first. Updates if a space with the same title exists, creates otherwise.
+# MAGIC This makes the job idempotent and safe to re-run.
 
 # COMMAND ----------
+
+import uuid
 
 host = w.config.host.rstrip("/")
 
 
-def create_genie_space(config: dict) -> dict:
-    """Create a Genie space using the SDK API client."""
-    import uuid
-
-    serialized_space = {
+def _build_serialized_space(config: dict) -> str:
+    """Build the v2 serialized_space payload."""
+    return json.dumps({
         "version": 2,
         "data_sources": {
             "tables": [{"identifier": t} for t in sorted(config["table_identifiers"])],
@@ -154,30 +155,54 @@ def create_genie_space(config: dict) -> dict:
                 for q in config["sample_questions"]
             ],
         },
-    }
+    })
 
-    body = {
-        "title": config["title"],
-        "description": config["description"],
-        "warehouse_id": WAREHOUSE_ID,
-        "serialized_space": json.dumps(serialized_space),
-    }
 
-    try:
-        result = w.api_client.do("POST", "/api/2.0/genie/spaces", body=body)
-        print(f"Created Genie space: {config['title']} -> {result.get('space_id', 'N/A')}")
+def list_existing_spaces() -> dict:
+    """Return a dict mapping title -> space_id for all accessible Genie spaces."""
+    result = w.api_client.do("GET", "/api/2.0/genie/spaces")
+    spaces = result.get("spaces", [])
+    return {s["title"]: s["space_id"] for s in spaces if "title" in s and "space_id" in s}
+
+
+def create_or_update_genie_space(config: dict, existing: dict) -> dict:
+    """Create a new Genie space or update an existing one matched by title."""
+    title = config["title"]
+    serialized = _build_serialized_space(config)
+
+    if title in existing:
+        space_id = existing[title]
+        body = {
+            "title": title,
+            "description": config["description"],
+            "warehouse_id": WAREHOUSE_ID,
+            "serialized_space": serialized,
+        }
+        result = w.api_client.do("PATCH", f"/api/2.0/genie/spaces/{space_id}", body=body)
+        print(f"Updated Genie space: {title} -> {space_id}")
+        result["space_id"] = space_id
         return result
-    except Exception as e:
-        print(f"Error creating {config['title']}: {e}")
-        raise
+    else:
+        body = {
+            "title": title,
+            "description": config["description"],
+            "warehouse_id": WAREHOUSE_ID,
+            "serialized_space": serialized,
+        }
+        result = w.api_client.do("POST", "/api/2.0/genie/spaces", body=body)
+        print(f"Created Genie space: {title} -> {result.get('space_id', 'N/A')}")
+        return result
 
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Create All Three Genie Spaces
+# MAGIC ## Create or Update All Three Genie Spaces
 
 # COMMAND ----------
+
+existing_spaces = list_existing_spaces()
+print(f"Found {len(existing_spaces)} existing Genie space(s)")
 
 space_ids = {}
 space_key_map = {
@@ -187,12 +212,12 @@ space_key_map = {
 }
 
 for config in GENIE_CONFIGS:
-    result = create_genie_space(config)
+    result = create_or_update_genie_space(config, existing_spaces)
     space_id = result.get("space_id")
     key = space_key_map[config["title"]]
     space_ids[key] = space_id
     print(f"  {key} = {space_id}")
-    time.sleep(2)  # Brief pause between API calls
+    time.sleep(2)
 
 # COMMAND ----------
 
@@ -217,7 +242,7 @@ print(f"Set task value: warehouse_id = {WAREHOUSE_ID}")
 
 org_id = host.split("//")[1].split(".")[0]
 
-print("\n=== Genie Spaces Created ===")
+print("\n=== Genie Spaces ===")
 for key, space_id in space_ids.items():
     print(f"  {key}: {space_id}")
     print(f"  URL: {host}/genie/rooms/{space_id}?o={org_id}")

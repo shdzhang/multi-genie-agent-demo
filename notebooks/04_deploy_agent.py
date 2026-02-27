@@ -52,16 +52,38 @@ except Exception:
 
 # COMMAND ----------
 
+import time
 from databricks import agents
+from databricks.sdk import WorkspaceClient
 
 ENDPOINT_NAME = f"multi_genie_supervisor_{CATALOG}"
+w = WorkspaceClient()
+
+# Wait for endpoint to finish any in-progress update before deploying
+try:
+    ep = w.serving_endpoints.get(ENDPOINT_NAME)
+    state = ep.state
+    if state and "UPDATING" in str(state.config_update):
+        print(f"Endpoint '{ENDPOINT_NAME}' is currently updating. Waiting...")
+        for i in range(60):
+            time.sleep(10)
+            ep = w.serving_endpoints.get(ENDPOINT_NAME)
+            state = ep.state
+            if state and "UPDATING" not in str(state.config_update):
+                print(f"  Update finished after ~{(i+1)*10}s")
+                break
+            print(f"  [{(i+1)*10}s] Still updating...")
+        else:
+            print("WARNING: Endpoint still updating after 10 minutes, attempting deploy anyway.")
+except Exception:
+    print(f"Endpoint '{ENDPOINT_NAME}' does not exist yet, will be created.")
 
 deployment = agents.deploy(
     UC_MODEL_NAME,
     MODEL_VERSION,
     endpoint_name=ENDPOINT_NAME,
     tags={"endpointSource": "playground", "demo": "multi-genie-agent"},
-    # No environment_vars needed - OBO handles auth per-user
+    deploy_feedback_model=True,
 )
 
 print(f"Deployment initiated: {ENDPOINT_NAME}")
@@ -73,11 +95,6 @@ print(f"Model: {UC_MODEL_NAME} v{MODEL_VERSION}")
 # MAGIC ## Wait for Endpoint to be Ready
 
 # COMMAND ----------
-
-import time
-from databricks.sdk import WorkspaceClient
-
-w = WorkspaceClient()
 
 print(f"Waiting for endpoint '{ENDPOINT_NAME}' to be ready...")
 for attempt in range(60):
@@ -106,7 +123,7 @@ import mlflow
 result = mlflow.deployments.predict(
     endpoint=ENDPOINT_NAME,
     inputs={
-        "messages": [
+        "input": [
             {"role": "user", "content": "What was total revenue last quarter?"}
         ]
     },

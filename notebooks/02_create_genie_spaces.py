@@ -215,9 +215,11 @@ print(f"Set task value: warehouse_id = {WAREHOUSE_ID}")
 
 # COMMAND ----------
 
+org_id = host.split("//")[1].split(".")[0]
+
 print("\n=== Genie Spaces Created ===")
 for key, space_id in space_ids.items():
     print(f"  {key}: {space_id}")
-    print(f"  URL: {host}/explore/genie/{space_id}")
+    print(f"  URL: {host}/genie/rooms/{space_id}?o={org_id}")
 print(f"\nWarehouse ID: {WAREHOUSE_ID}")
 print("\nNext step: Verify each Genie space works in the UI before building the agent.")

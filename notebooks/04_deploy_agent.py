@@ -59,24 +59,37 @@ from databricks.sdk import WorkspaceClient
 ENDPOINT_NAME = f"multi_genie_supervisor_{CATALOG}"
 w = WorkspaceClient()
 
-# Wait for endpoint to finish any in-progress update before deploying
-try:
-    ep = w.serving_endpoints.get(ENDPOINT_NAME)
-    state = ep.state
-    if state and "UPDATING" in str(state.config_update):
-        print(f"Endpoint '{ENDPOINT_NAME}' is currently updating. Waiting...")
-        for i in range(60):
-            time.sleep(10)
-            ep = w.serving_endpoints.get(ENDPOINT_NAME)
-            state = ep.state
-            if state and "UPDATING" not in str(state.config_update):
-                print(f"  Update finished after ~{(i+1)*10}s")
-                break
-            print(f"  [{(i+1)*10}s] Still updating...")
-        else:
-            print("WARNING: Endpoint still updating after 10 minutes, attempting deploy anyway.")
-except Exception:
-    print(f"Endpoint '{ENDPOINT_NAME}' does not exist yet, will be created.")
+def _wait_for_endpoint_ready(w, name, timeout_minutes=15):
+    """Block until endpoint leaves UPDATING / NOT_READY state."""
+    for i in range(timeout_minutes * 6):
+        try:
+            ep = w.serving_endpoints.get(name)
+        except Exception:
+            return None
+        state = ep.state
+        updating = state and "IN_PROGRESS" in str(state.config_update)
+        not_ready = state and "NOT_READY" in str(state.ready) and "READY" != str(state.ready)
+        if not updating and not not_ready:
+            return ep
+        if i == 0:
+            print(f"Endpoint '{name}' is not ready yet. Waiting...")
+        if i % 6 == 0:
+            print(f"  [{i*10}s] config_update={state.config_update}, ready={state.ready}")
+        time.sleep(10)
+    print(f"WARNING: Endpoint still not ready after {timeout_minutes} min.")
+    return w.serving_endpoints.get(name)
+
+existing_ep = _wait_for_endpoint_ready(w, ENDPOINT_NAME)
+
+if existing_ep is not None:
+    current_model = None
+    if existing_ep.config and existing_ep.config.served_entities:
+        se = existing_ep.config.served_entities[0]
+        current_model = f"{se.entity_name} v{se.entity_version}"
+    print(f"Endpoint '{ENDPOINT_NAME}' already exists (serving {current_model}).")
+    print(f"Updating to {UC_MODEL_NAME} v{MODEL_VERSION} ...")
+else:
+    print(f"Endpoint '{ENDPOINT_NAME}' does not exist. Creating with {UC_MODEL_NAME} v{MODEL_VERSION} ...")
 
 deployment = agents.deploy(
     UC_MODEL_NAME,
@@ -86,7 +99,8 @@ deployment = agents.deploy(
     deploy_feedback_model=True,
 )
 
-print(f"Deployment initiated: {ENDPOINT_NAME}")
+action = "Updated" if existing_ep else "Created"
+print(f"{action} endpoint: {ENDPOINT_NAME}")
 print(f"Model: {UC_MODEL_NAME} v{MODEL_VERSION}")
 
 # COMMAND ----------
@@ -97,19 +111,22 @@ print(f"Model: {UC_MODEL_NAME} v{MODEL_VERSION}")
 # COMMAND ----------
 
 print(f"Waiting for endpoint '{ENDPOINT_NAME}' to be ready...")
-for attempt in range(60):
+for attempt in range(90):
     try:
         endpoint = w.serving_endpoints.get(ENDPOINT_NAME)
         state = endpoint.state
-        if state and str(state.ready) == "Ready.READY":
+        config_done = state and "IN_PROGRESS" not in str(state.config_update)
+        is_ready = state and "NOT_READY" not in str(state.ready)
+        if config_done and is_ready:
             print(f"Endpoint is READY after ~{attempt * 10}s")
             break
-        print(f"  [{attempt * 10}s] State: {state}")
+        if attempt % 6 == 0:
+            print(f"  [{attempt * 10}s] config_update={state.config_update}, ready={state.ready}")
     except Exception as e:
         print(f"  [{attempt * 10}s] Waiting... ({e})")
     time.sleep(10)
 else:
-    print("WARNING: Endpoint did not become ready within 10 minutes.")
+    print("WARNING: Endpoint did not become ready within 15 minutes.")
 
 # COMMAND ----------
 

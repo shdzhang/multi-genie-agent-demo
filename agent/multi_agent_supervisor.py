@@ -14,6 +14,7 @@ compatibility.
 """
 
 import functools
+import uuid
 from typing import Generator, Literal
 
 import mlflow
@@ -22,8 +23,6 @@ from mlflow.types.responses import (
     ResponsesAgentRequest,
     ResponsesAgentResponse,
     ResponsesAgentStreamEvent,
-    output_to_responses_items_stream,
-    to_chat_completions_input,
 )
 
 from databricks.sdk import WorkspaceClient
@@ -260,30 +259,40 @@ class MultiGenieAgentSupervisor(ResponsesAgent):
         return WorkspaceClient()
 
     def predict(self, request: ResponsesAgentRequest) -> ResponsesAgentResponse:
-        outputs = [
-            event.item
-            for event in self.predict_stream(request)
-            if event.type == "response.output_item.done"
-        ]
+        user_client = self._get_obo_client()
+        graph = build_graph(user_client)
+
+        messages = []
+        for item in request.input:
+            if hasattr(item, "role") and hasattr(item, "content"):
+                messages.append({"role": item.role, "content": item.content})
+
+        result = graph.invoke({"messages": messages})
+
+        final_messages = result.get("messages", [])
+        answer = ""
+        if final_messages:
+            last = final_messages[-1]
+            answer = last.content if hasattr(last, "content") else str(last)
+
         return ResponsesAgentResponse(
-            output=outputs, custom_outputs=request.custom_inputs
+            output=[
+                self.create_text_output_item(
+                    text=answer, id=f"msg_{uuid.uuid4().hex[:8]}"
+                )
+            ]
         )
 
     def predict_stream(
         self, request: ResponsesAgentRequest
     ) -> Generator[ResponsesAgentStreamEvent, None, None]:
-        user_client = self._get_obo_client()
-        graph = build_graph(user_client)
-
-        cc_msgs = to_chat_completions_input([i.model_dump() for i in request.input])
-
-        for _, events in graph.stream(
-            {"messages": cc_msgs}, stream_mode=["updates"]
-        ):
-            for node_data in events.values():
-                msgs = node_data.get("messages", [])
-                if msgs:
-                    yield from output_to_responses_items_stream(msgs)
+        """Streaming version - delegates to non-streaming for simplicity."""
+        result = self.predict(request)
+        for item in result.output:
+            yield ResponsesAgentStreamEvent(
+                type="response.output_item.done",
+                item=item,
+            )
 
 
 # ---------------------------------------------------------------------------

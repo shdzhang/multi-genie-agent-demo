@@ -189,20 +189,18 @@ cfg.get("llm_endpoint")
 
 ### `ModuleNotFoundError: No module named 'databricks_ai_bridge.utils.auth'`
 
-**Symptom**: Agent import fails at serving time when trying to use `ModelServingUserCredentials`.
+**Symptom**: Agent import fails at serving time with `ModuleNotFoundError: No module named 'databricks_ai_bridge.utils.auth'`.
 
-**Root cause**: With the `ResponsesAgent` interface and `auth_policy` configuration, OBO credentials are injected automatically. `WorkspaceClient()` auto-detects the credential type in the serving context — no manual credential strategy is needed.
+**Root cause**: The import path `databricks_ai_bridge.utils.auth` does not exist. `ModelServingUserCredentials` lives directly under `databricks_ai_bridge`.
 
-**Fix**: Replace explicit credential handling with a plain `WorkspaceClient()`:
+**Fix**: Use the correct import path:
 
 ```python
 # Before (broken):
 from databricks_ai_bridge.utils.auth import ModelServingUserCredentials
-creds = ModelServingUserCredentials()
-return WorkspaceClient(credentials_strategy=creds)
 
 # After (fixed):
-return WorkspaceClient()
+from databricks_ai_bridge import ModelServingUserCredentials
 ```
 
 ### `Invalid user API scope(s): genie, serving-endpoints`
@@ -227,11 +225,11 @@ api_scopes=["dashboards.genie", "serving.serving-endpoints"]
 
 **Root cause**: Re-running the job while the endpoint is mid-update causes a conflict. The deploy call does not wait for the previous update to finish.
 
-**Fix**: Poll the endpoint state before deploying and wait for `UPDATING` to clear:
+**Fix**: Poll the endpoint state before deploying and wait for `IN_PROGRESS` to clear. Do **not** check for `"UPDATING"` — that substring matches `"NOT_UPDATING"` and causes an infinite loop (see next entry).
 
 ```python
 ep = w.serving_endpoints.get(ENDPOINT_NAME)
-while "UPDATING" in str(ep.state.config_update):
+while "IN_PROGRESS" in str(ep.state.config_update):
     time.sleep(10)
     ep = w.serving_endpoints.get(ENDPOINT_NAME)
 ```
@@ -314,24 +312,9 @@ result = w.api_client.do(
 
 **Symptom**: Endpoint returns `{"object":"response","output":[],"id":"..."}` with no content. The Playground shows "Received an invalid and unexpected value from the API: undefined".
 
-**Root cause**: The `predict_stream` method used `output_to_responses_items_stream(msgs)` to convert LangGraph messages to Responses API events. This function could not handle plain dict messages from LangGraph nodes, so it yielded zero events. The `predict` method collected nothing.
+**Root cause**: The `predict_stream` method used `output_to_responses_items_stream(msgs)` to convert LangGraph messages to Responses API events. This function could not handle plain dict messages from LangGraph nodes, so it yielded zero events.
 
-**Fix**: Follow the `ResponsesAgent` pattern — run `graph.invoke()` to completion in `predict`, extract the final answer, and use `self.create_text_output_item()`:
-
-```python
-def predict(self, request):
-    result = graph.invoke({"messages": messages})
-    last = result["messages"][-1]
-    answer = last.content if hasattr(last, "content") else str(last)
-    return ResponsesAgentResponse(
-        output=[self.create_text_output_item(text=answer, id=f"msg_{uuid.uuid4().hex[:8]}")]
-    )
-
-def predict_stream(self, request):
-    result = self.predict(request)
-    for item in result.output:
-        yield ResponsesAgentStreamEvent(type="response.output_item.done", item=item)
-```
+**Fix**: Use `self.create_text_output_item()` instead of `output_to_responses_items_stream()` to construct response items. See the "Streaming output" entry below for the full current pattern.
 
 ### All responses return "I wasn't able to find the relevant information"
 
@@ -389,5 +372,80 @@ In `demo_job.yml`, pass the variable to every task:
 
 ```yaml
 base_parameters:
-  experiment_name: ${var.experiment_name}
+  experiment_name: ${resources.experiments.multi_genie_experiment.name}
 ```
+
+### `AttributeError: 'dict' object has no attribute 'id'` during model logging
+
+**Symptom**: `mlflow.pyfunc.log_model` fails during input validation with `AttributeError: 'dict' object has no attribute 'id'`.
+
+**Root cause**: When using `graph.stream()` with `stream_mode=["updates"]`, node outputs are yielded as raw dicts *before* the `MessagesState` reducer converts them into LangChain message objects. Accessing `.id` on these dicts fails. This only affects custom graph nodes that return plain dicts in their `messages` list (e.g., `agent_node`, `final_answer_node`).
+
+**Fix**: Use `getattr` with a fallback for safe id access:
+
+```python
+def _mid(m):
+    return getattr(m, "id", None) or id(m)
+
+new_msgs = [msg for ... if _mid(msg) not in seen_ids]
+```
+
+### Streaming output includes raw `<name>` tags and intermediate agent messages
+
+**Symptom**: When `predict()` delegates to `predict_stream()`, the response includes all intermediate outputs — `<name>SalesAgent</name>`, raw dict representations, and intermediate supervisor messages — instead of a clean final answer.
+
+**Root cause**: `predict_stream()` emits events for *every* node (agent names, intermediate responses, supervisor routing). If `predict()` collects all of these, the output is a messy concatenation of intermediate state.
+
+**Fix**: Make `predict()` and `predict_stream()` independent methods, each running the graph separately:
+
+```python
+def predict(self, request):
+    # Blocking: run graph to completion, return only the final answer
+    result = graph.invoke({"messages": messages})
+    last = result["messages"][-1]
+    return ResponsesAgentResponse(
+        output=[self.create_text_output_item(text=last.content, ...)]
+    )
+
+def predict_stream(self, request):
+    # Streaming: emit <name> annotations + content as each node completes
+    for _, events in graph.stream({"messages": messages}, stream_mode=["updates"]):
+        node_name = tuple(events.keys())[0]
+        yield event_with_text(f"<name>{node_name}</name>")
+        for msg in new_msgs:
+            yield event_with_text(msg.content)
+```
+
+`predict()` is used by API consumers (clean output). `predict_stream()` is used by AI Playground (live progress).
+
+### `NotFound: Model version '1' does not exist` during deployment
+
+**Symptom**: `agents.deploy()` fails with `NotFound: Model version '1' does not exist` even though the correct model version (e.g., v9) is being deployed.
+
+**Root cause**: The serving endpoint was previously serving a feedback model (e.g., `shidong_catalog.multi_genie_demo.feedback v1`). If that model or its versions were deleted (e.g., by cleaning up experiments), `agents.deploy()` internally tries to reference the stale feedback model and fails.
+
+**Fix**: Delete the stale serving endpoint and let `agents.deploy()` create a fresh one:
+
+```bash
+databricks serving-endpoints delete <endpoint_name> -p <profile>
+```
+
+Then re-run the deploy task.
+
+### `cannot update mlflow experiment: Node ... is in the trash`
+
+**Symptom**: `databricks bundle deploy` fails with `cannot update mlflow experiment: Node /Users/.../Trash/prod_multi_genie_supervisor is in the trash; refusing to move it`.
+
+**Root cause**: The MLflow experiment was soft-deleted (moved to Trash). The bundle's Terraform state still references the old experiment ID, and Terraform tries to update it, but the workspace refuses to move a trashed node.
+
+**Fix**: Restore the experiment from trash first, then redeploy:
+
+```bash
+# Find the experiment ID (check bundle deploy error message or use list-experiments)
+databricks experiments restore-experiment <experiment_id> -p <profile>
+
+# Then redeploy — the bundle will update the restored experiment in place
+databricks bundle deploy -t <target> -p <profile> --force-lock
+```
+
+Do **not** delete the experiment after restoring — `delete-experiment` is a soft delete that puts it right back in the trash.

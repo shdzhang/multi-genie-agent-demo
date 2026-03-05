@@ -68,6 +68,45 @@ WORKER_DESCRIPTIONS = {
     ),
 }
 
+# ---------------------------------------------------------------------------
+# Keyword-based direct routing for obvious single-domain queries.
+# Skips the LLM supervisor call on the first iteration when the domain is
+# unambiguous, saving ~1-2s latency and one LLM invocation.
+# ---------------------------------------------------------------------------
+DOMAIN_KEYWORDS = {
+    "SalesAgent": {
+        "revenue", "sales", "order", "orders", "customer segment", "product performance",
+        "average order value", "aov", "top products", "sales volume", "margin",
+        "margins", "discount", "pricing", "customer", "customers", "purchase",
+    },
+    "HRAgent": {
+        "headcount", "attrition", "turnover", "employee", "employees", "hiring",
+        "recruitment", "salary", "salaries", "compensation", "performance review",
+        "performance score", "department budget", "workforce", "hr", "people",
+        "organizational", "retention", "onboarding",
+    },
+    "SupplyChainAgent": {
+        "supply chain", "delivery", "warehouse", "warehouses", "inventory",
+        "supplier", "suppliers", "lead time", "logistics", "shipping", "freight",
+        "stock", "fulfillment", "procurement", "capacity", "on-time",
+    },
+}
+
+
+def _try_keyword_route(question: str) -> str | None:
+    """Return agent name if exactly one domain matches, else None."""
+    lower = question.lower()
+    matched = [
+        agent_name
+        for agent_name, keywords in DOMAIN_KEYWORDS.items()
+        if any(kw in lower for kw in keywords)
+    ]
+    unique = set(matched)
+    if len(unique) == 1:
+        return unique.pop()
+    return None
+
+
 SUPERVISOR_SYSTEM_PROMPT = """You are a supervisor routing user questions to specialized data agents.
 
 Available agents:
@@ -96,7 +135,7 @@ class SupervisorState(MessagesState):
 def build_graph(user_client: WorkspaceClient) -> StateGraph:
     """Construct a LangGraph with OBO GenieAgent workers + supervisor."""
 
-    llm = ChatDatabricks(endpoint=LLM_ENDPOINT)
+    llm = ChatDatabricks(endpoint=LLM_ENDPOINT, max_retries=3)
 
     sales_agent = GenieAgent(
         genie_space_id=SALES_GENIE_SPACE_ID,
@@ -141,10 +180,17 @@ def build_graph(user_client: WorkspaceClient) -> StateGraph:
     supervisor_chain = preprocessor | llm.with_structured_output(NextNode)
 
     def agent_node(state: dict, agent, name: str) -> dict:
-        """Execute a GenieAgent worker and return its response."""
-        result = agent.invoke({"messages": state["messages"]})
-        last_msg = result["messages"][-1]
-        content = last_msg.content if hasattr(last_msg, "content") else str(last_msg)
+        """Execute a GenieAgent worker and return its response.
+        Catches errors so a single failing domain degrades gracefully."""
+        try:
+            result = agent.invoke({"messages": state["messages"]})
+            last_msg = result["messages"][-1]
+            content = last_msg.content if hasattr(last_msg, "content") else str(last_msg)
+        except Exception as e:
+            content = (
+                f"[{name} unavailable] Unable to retrieve data from this domain. "
+                f"Error: {type(e).__name__}: {e}"
+            )
         return {
             "messages": [
                 {
@@ -161,6 +207,18 @@ def build_graph(user_client: WorkspaceClient) -> StateGraph:
 
         if count > MAX_ITERATIONS:
             return {"next_node": "FINISH", "iteration_count": count}
+
+        # Fast path: keyword-based routing on the first iteration
+        if count == 1:
+            first_msg = state["messages"][0]
+            question = (
+                first_msg.get("content", "")
+                if isinstance(first_msg, dict)
+                else getattr(first_msg, "content", str(first_msg))
+            )
+            direct = _try_keyword_route(question)
+            if direct:
+                return {"next_node": direct, "iteration_count": count}
 
         result = supervisor_chain.invoke(state)
         next_node = result.next_node

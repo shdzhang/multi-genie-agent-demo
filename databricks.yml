@@ -35,6 +35,8 @@ targets:
     default: true
     workspace:
       profile: azure-szwestus-stable
+    variables:
+      catalog_name: szwestus_stable
 
   prod:
     mode: production

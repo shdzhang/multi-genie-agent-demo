@@ -126,8 +126,8 @@ import time
 
 def predict_fn(question: str) -> str:
     """Query the deployed ResponsesAgent and return the text answer.
-    Retries with exponential backoff on rate-limit (429) errors."""
-    max_retries = 4
+    Retries on rate-limit (429) and OBO auth warmup errors."""
+    max_retries = 5
     for attempt in range(max_retries):
         try:
             result = w.api_client.do(
@@ -143,13 +143,18 @@ def predict_fn(question: str) -> str:
                             parts.append(block.get("text", ""))
             return "".join(parts)
         except Exception as e:
-            if "429" in str(e) or "REQUEST_LIMIT_EXCEEDED" in str(e):
+            err = str(e)
+            if "429" in err or "REQUEST_LIMIT_EXCEEDED" in err:
                 wait = 2 ** (attempt + 1)
                 print(f"Rate limited, retrying in {wait}s... (attempt {attempt + 1}/{max_retries})")
                 time.sleep(wait)
+            elif "model_serving_user_credentials" in err or "Unable to detect credentials" in err:
+                wait = 60
+                print(f"Endpoint OBO auth warming up, retrying in {wait}s... (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait)
             else:
                 raise
-    raise RuntimeError(f"Failed after {max_retries} retries due to rate limiting")
+    raise RuntimeError(f"Failed after {max_retries} retries")
 
 # COMMAND ----------
 

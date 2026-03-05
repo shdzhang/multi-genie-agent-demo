@@ -29,7 +29,14 @@ print(f"Catalog: {CATALOG}, Schema: {SCHEMA}")
 
 # COMMAND ----------
 
-spark.sql(f"CREATE CATALOG IF NOT EXISTS {CATALOG}")
+try:
+    spark.sql(f"CREATE CATALOG IF NOT EXISTS {CATALOG}")
+except Exception as e:
+    if "INVALID_STATE" in str(e) or "storage root" in str(e).lower():
+        print(f"Catalog '{CATALOG}' already exists or cannot be auto-created (Default Storage). Continuing.")
+    else:
+        raise
+
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
 spark.sql(f"USE CATALOG {CATALOG}")
 spark.sql(f"USE SCHEMA {SCHEMA}")

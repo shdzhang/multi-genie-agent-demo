@@ -10,18 +10,50 @@ A reusable demo showing how to build a **multi-agent supervisor** on top of mult
 └──────────────────────┬───────────────────────────────────┘
                        │
                        ▼
-┌──────────────────────────────────────────────────────────┐
-│              Supervisor (LangGraph)                       │
-│  Analyzes query → routes to best agent → synthesizes     │
-└──────┬──────────────┬──────────────────┬─────────────────┘
-       │              │                  │
-       ▼              ▼                  ▼
-┌──────────┐  ┌──────────────┐  ┌────────────────┐
-│  Sales   │  │     HR       │  │  Supply Chain  │
-│  Genie   │  │    Genie     │  │    Genie       │
-│  Space   │  │    Space     │  │    Space       │
-└──────────┘  └──────────────┘  └────────────────┘
+              ┌────────────────┐
+              │ Keyword Router │  (fast path: skips LLM if
+              │ _try_keyword_  │   single domain is obvious)
+              │    route()     │
+              └───────┬────────┘
+                      │
+           ┌──── hit ─┤─── miss ──┐
+           │          │           │
+           │          ▼           │
+           │  ┌───────────────┐   │
+           │  │  Supervisor   │   │
+           │  │  (LLM call)   │   │
+           │  │  Structured   │   │
+           │  │  output →     │   │
+           │  │  route/FINISH │   │
+           │  └───────┬───────┘   │
+           │          │           │
+           ▼          ▼           ▼
+     ┌──────────┐ ┌─────────┐ ┌────────────────┐
+     │  Sales   │ │   HR    │ │  Supply Chain  │
+     │  Genie   │ │  Genie  │ │    Genie       │
+     │  Agent   │ │  Agent  │ │    Agent       │
+     └──────────┘ └─────────┘ └────────────────┘
+           │          │           │
+           └──────────┼───────────┘
+                      ▼
+              ┌───────────────┐
+              │ Final Answer  │  (LLM synthesizes all
+              │    Node       │   worker responses)
+              └───────────────┘
 ```
+
+## Key Features
+
+- **Multi-agent supervisor** — LangGraph routes queries to domain-specific Genie spaces via an LLM supervisor with structured output
+- **Keyword-based direct routing** — Obvious single-domain queries bypass the LLM supervisor, saving ~1-2s latency and one LLM call
+- **Graceful error handling** — Individual GenieAgent failures degrade gracefully instead of crashing the entire pipeline
+- **OBO authentication** — Each request runs with the calling user's credentials, enforcing per-user Unity Catalog ACLs
+- **MLflow ResponsesAgent** — OpenAI Responses API compatible interface with both `predict()` and `predict_stream()` methods
+- **mlflow.genai.evaluate()** — Automated evaluation with LLM judges (Correctness, Guidelines) and custom code scorers
+- **Multi-cloud deployment** — DABs targets for both GCP and Azure workspaces with per-target variable overrides
+- **Idempotent deployment** — Endpoint creation skips re-deploy when already serving the target model+version
+- **Rate limit resilience** — `max_retries=3` on `ChatDatabricks` and retry logic in evaluation for FMAPI rate limits
+- **Databricks Asset Bundles** — Single `databricks bundle deploy && databricks bundle run demo` for the full pipeline
 
 ## Three Business Domains
 
@@ -53,29 +85,46 @@ This demo uses **OBO (on-behalf-of-user)** rather than a shared PAT:
 
 ```bash
 # 1. Deploy the bundle (creates schema, registered model, experiment, and job)
-databricks bundle deploy -t dev -p <your-profile>
+databricks bundle deploy -t prod
 
-# 2. Run the full end-to-end pipeline (data → Genie spaces → agent → deploy → test)
-databricks bundle run demo -t dev -p <your-profile>
+# 2. Run the full end-to-end pipeline (data → Genie spaces → agent → deploy → evaluate)
+databricks bundle run demo -t prod
 ```
+
+### Multi-Cloud Targets
+
+| Target | Profile | Catalog | Workspace |
+|--------|---------|---------|-----------|
+| `dev` | `azure-szwestus-stable` | `szwestus_stable` | Azure (West US) |
+| `prod` (default) | `fe-prod-dbx-ws` | `shidong_catalog` | GCP |
+
+Override variables per target in `databricks.yml`. The `catalog_name` variable is overridden for `dev` to match the Azure workspace's catalog.
 
 ## Project Structure
 
 ```
 multi-genie-agent-demo/
-├── databricks.yml                    # Bundle config (variables, targets)
+├── databricks.yml                    # Bundle config (variables, multi-cloud targets)
 ├── resources/
-│   ├── model_artifacts.yml           # Schema, registered model, experiment
-│   └── demo_job.yml                  # Single job: data → Genie → agent → deploy → test
+│   ├── model_artifacts.yml           # Schema, registered model, experiment (with resource refs)
+│   └── demo_job.yml                  # Single job: data → Genie → agent → deploy → evaluate
 ├── notebooks/
-│   ├── 01_setup_data.py              # Create catalog/schema, generate 12 tables
-│   ├── 02_create_genie_spaces.py     # Create 3 Genie spaces via REST API
-│   ├── 03_agent_build.py             # Log multi-agent to MLflow with AuthPolicy
-│   ├── 04_deploy_agent.py            # Deploy to Model Serving endpoint
-│   └── 05_test_and_evaluate.py       # E2E testing across all 3 domains
+│   ├── 01_setup_data.py              # Create catalog/schema, generate 12 tables (Azure-safe)
+│   ├── 02_create_genie_spaces.py     # Create/update 3 Genie spaces via REST API
+│   ├── 03_agent_build.py             # Log ResponsesAgent to MLflow with OBO AuthPolicy
+│   ├── 04_deploy_agent.py            # Deploy to Model Serving (idempotent, wait for ready)
+│   └── 05_test_and_evaluate.py       # mlflow.genai.evaluate() with LLM judges + custom scorers
 ├── agent/
-│   └── multi_agent_supervisor.py     # LangGraph + OBO agent code
+│   └── multi_agent_supervisor.py     # LangGraph supervisor + keyword routing + OBO + ResponsesAgent
 └── README.md
+```
+
+### Pipeline Flow (demo_job.yml)
+
+All parameters (`catalog_name`, `schema_name`, `model_name`, `llm_endpoint`, `experiment_name`) are passed from bundle variables via `base_parameters` — notebooks have no hardcoded defaults.
+
+```
+generate_data → create_genie_spaces → build_agent → deploy_agent → test_evaluate
 ```
 
 ## Customization
@@ -449,3 +498,68 @@ databricks bundle deploy -t <target> -p <profile> --force-lock
 ```
 
 Do **not** delete the experiment after restoring — `delete-experiment` is a soft delete that puts it right back in the trash.
+
+### `REQUEST_LIMIT_EXCEEDED` during `mlflow.pyfunc.log_model()`
+
+**Symptom**: `mlflow.pyfunc.log_model()` fails with `RateLimitError: REQUEST_LIMIT_EXCEEDED: Exceeded workspace input tokens per minute rate limit for databricks-claude-sonnet-4-5`.
+
+**Root cause**: `log_model()` with `input_example` automatically runs the example through the model for validation. For this agent, that triggers the full LangGraph pipeline: a supervisor LLM call, one or more GenieAgent calls, and a final synthesis LLM call. If the workspace rate limit is already near capacity, this validation exceeds it.
+
+**Fix**: Add `max_retries=3` to `ChatDatabricks` in the agent code so transient rate limits are retried transparently. If the limit is persistently hit, wait and re-run the job.
+
+```python
+llm = ChatDatabricks(endpoint=LLM_ENDPOINT, max_retries=3)
+```
+
+### `INVALID_STATE: Metastore storage root URL does not exist` (Azure Default Storage)
+
+**Symptom**: `CREATE CATALOG IF NOT EXISTS` fails with `INVALID_STATE` on Azure workspaces with Default Storage enabled, even when the catalog already exists.
+
+**Root cause**: Azure workspaces with Default Storage perform a storage root validation during `CREATE CATALOG`. This validation fails because Default Storage manages storage implicitly, but `IF NOT EXISTS` still triggers the check.
+
+**Fix**: Wrap the catalog creation in a `try/except` that catches `INVALID_STATE` errors and continues:
+
+```python
+try:
+    spark.sql(f"CREATE CATALOG IF NOT EXISTS {CATALOG}")
+except Exception as e:
+    if "INVALID_STATE" in str(e) or "storage root" in str(e).lower():
+        print(f"Catalog '{CATALOG}' already exists or cannot be auto-created. Continuing.")
+    else:
+        raise
+```
+
+### `Unable to detect credentials for user authorization` (OBO warmup)
+
+**Symptom**: Endpoint returns `model_serving_user_credentials auth: Unable to detect credentials for user authorization` immediately after deployment.
+
+**Root cause**: Model Serving endpoints with OBO authentication require a warm-up period for the OBO authorization layer to initialize. Queries made in the first 1-2 minutes after deployment (smoke tests, evaluation calls) hit this window.
+
+**Fix**: Retry with a 60-second backoff for OBO warmup errors. The evaluation notebook (`05_test_and_evaluate.py`) includes this logic:
+
+```python
+except Exception as e:
+    err = str(e)
+    if "model_serving_user_credentials" in err or "Unable to detect credentials" in err:
+        wait = 60
+        print(f"Endpoint OBO auth warming up, retrying in {wait}s...")
+        time.sleep(wait)
+```
+
+The deploy notebook's smoke test treats this as expected behavior and prints a guidance message instead of failing the task.
+
+### `cannot create registered model: Schema ... does not exist` (bundle deploy ordering)
+
+**Symptom**: `databricks bundle deploy` fails because Terraform tries to create the registered model before the schema it belongs to.
+
+**Root cause**: When both the schema and registered model are declared in the same bundle, Terraform may process them in parallel. Using `${var.schema_name}` in the registered model's `schema_name` field gives Terraform no hint that the schema resource must be created first.
+
+**Fix**: Use a resource reference (`${resources.schemas.<key>.name}`) for `schema_name`, which creates an implicit Terraform dependency:
+
+```yaml
+registered_models:
+  multi_genie_supervisor:
+    catalog_name: ${var.catalog_name}
+    schema_name: ${resources.schemas.demo_schema.name}  # implicit dependency
+    name: ${var.model_name}
+```

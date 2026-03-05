@@ -6,7 +6,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install mlflow>=3.0 databricks-agents pandas
+# MAGIC %pip install "mlflow[databricks]>=3.1.0" databricks-agents pandas
 # MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
@@ -51,161 +51,197 @@ print(f"Testing endpoint: {ENDPOINT_NAME}")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Define Test Questions
+# MAGIC ## Define Evaluation Dataset
+# MAGIC
+# MAGIC Each row has `inputs` (passed to `predict_fn`) and `expectations` (used by scorers).
 
 # COMMAND ----------
 
-TEST_CASES = [
+eval_dataset = [
     # Sales & Revenue
-    {"question": "What was total revenue last quarter?", "expected_domain": "SalesAgent", "domain": "Sales"},
-    {"question": "Top 10 products by sales volume this year", "expected_domain": "SalesAgent", "domain": "Sales"},
-    {"question": "Show average order value by customer segment", "expected_domain": "SalesAgent", "domain": "Sales"},
+    {
+        "inputs": {"question": "What was total revenue last quarter?"},
+        "expectations": {"expected_response": "A numerical revenue figure with currency, broken down or summarized by quarter."},
+    },
+    {
+        "inputs": {"question": "Top 10 products by sales volume this year"},
+        "expectations": {"expected_response": "A ranked list of products with their sales volumes or counts."},
+    },
+    {
+        "inputs": {"question": "Show average order value by customer segment"},
+        "expectations": {"expected_response": "Average order values segmented by customer type or category, with numerical values."},
+    },
     # HR & People Analytics
-    {"question": "What is our attrition rate by department?", "expected_domain": "HRAgent", "domain": "HR"},
-    {"question": "Show average performance score by department", "expected_domain": "HRAgent", "domain": "HR"},
-    {"question": "Headcount growth over last 12 months", "expected_domain": "HRAgent", "domain": "HR"},
+    {
+        "inputs": {"question": "What is our attrition rate by department?"},
+        "expectations": {"expected_response": "Attrition or turnover percentages broken down by department."},
+    },
+    {
+        "inputs": {"question": "Show average performance score by department"},
+        "expectations": {"expected_response": "Performance scores or ratings averaged per department."},
+    },
+    {
+        "inputs": {"question": "Headcount growth over last 12 months"},
+        "expectations": {"expected_response": "Employee count trends or growth figures over the past year."},
+    },
     # Supply Chain & Operations
-    {"question": "What is our on-time delivery rate this month?", "expected_domain": "SupplyChainAgent", "domain": "SupplyChain"},
-    {"question": "Which warehouses are over 90% capacity?", "expected_domain": "SupplyChainAgent", "domain": "SupplyChain"},
-    {"question": "Top suppliers by lead time reliability", "expected_domain": "SupplyChainAgent", "domain": "SupplyChain"},
+    {
+        "inputs": {"question": "What is our on-time delivery rate this month?"},
+        "expectations": {"expected_response": "A percentage or rate indicating on-time delivery performance."},
+    },
+    {
+        "inputs": {"question": "Which warehouses are over 90% capacity?"},
+        "expectations": {"expected_response": "A list of warehouse names or IDs with capacity utilization above 90%."},
+    },
+    {
+        "inputs": {"question": "Top suppliers by lead time reliability"},
+        "expectations": {"expected_response": "A ranked list of suppliers with lead time or reliability metrics."},
+    },
     # Cross-domain
-    {"question": "How does our sales team headcount compare to revenue growth?", "expected_domain": "HRAgent", "domain": "Cross-domain"},
-    {"question": "What is the shipping cost impact on product margins?", "expected_domain": "SupplyChainAgent", "domain": "Cross-domain"},
+    {
+        "inputs": {"question": "How does our sales team headcount compare to revenue growth?"},
+        "expectations": {"expected_response": "A comparison of sales headcount trends against revenue trends, with numbers."},
+    },
+    {
+        "inputs": {"question": "What is the shipping cost impact on product margins?"},
+        "expectations": {"expected_response": "Analysis of shipping costs relative to product margins, with numerical data."},
+    },
 ]
 
-print(f"Total test cases: {len(TEST_CASES)}")
-for tc in TEST_CASES:
-    print(f"  [{tc['domain']}] {tc['question']}")
+print(f"Evaluation dataset: {len(eval_dataset)} test cases")
+for row in eval_dataset:
+    print(f"  Q: {row['inputs']['question']}")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Helper: Query Agent
-
-# COMMAND ----------
-
-def query_agent(question: str) -> dict:
-    """Query the ResponsesAgent endpoint and return parsed result."""
-    result = w.api_client.do(
-        "POST",
-        f"/serving-endpoints/{ENDPOINT_NAME}/invocations",
-        body={"input": [{"role": "user", "content": question}]},
-    )
-    answer = ""
-    for item in result.get("output", []):
-        if item.get("type") == "message":
-            for block in item.get("content", []):
-                if block.get("type") == "output_text":
-                    answer += block.get("text", "")
-    return {"answer": answer, "raw": result}
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Run Tests
+# MAGIC ## Define predict_fn
+# MAGIC
+# MAGIC Wraps the deployed agent endpoint so `mlflow.genai.evaluate()` can call it.
+# MAGIC The function receives `**kwargs` unpacked from each row's `inputs` dict.
 
 # COMMAND ----------
 
 import time
 
-results = []
-
-for i, tc in enumerate(TEST_CASES):
-    print(f"\n--- Test {i+1}/{len(TEST_CASES)}: [{tc['domain']}] ---")
-    print(f"Q: {tc['question']}")
-
-    start_time = time.time()
-    try:
-        response = query_agent(tc["question"])
-        elapsed = time.time() - start_time
-        answer = response["answer"]
-
-        print(f"A: {answer[:200]}...")
-        print(f"Time: {elapsed:.1f}s")
-
-        results.append({
-            "question": tc["question"],
-            "domain": tc["domain"],
-            "expected_agent": tc["expected_domain"],
-            "answer_preview": answer[:300],
-            "latency_s": round(elapsed, 1),
-            "status": "success",
-            "error": None,
-        })
-
-    except Exception as e:
-        elapsed = time.time() - start_time
-        print(f"ERROR: {e}")
-        results.append({
-            "question": tc["question"],
-            "domain": tc["domain"],
-            "expected_agent": tc["expected_domain"],
-            "answer_preview": None,
-            "latency_s": round(elapsed, 1),
-            "status": "error",
-            "error": str(e),
-        })
-
-    time.sleep(2)
+def predict_fn(question: str) -> str:
+    """Query the deployed ResponsesAgent and return the text answer.
+    Retries with exponential backoff on rate-limit (429) errors."""
+    max_retries = 4
+    for attempt in range(max_retries):
+        try:
+            result = w.api_client.do(
+                "POST",
+                f"/serving-endpoints/{ENDPOINT_NAME}/invocations",
+                body={"input": [{"role": "user", "content": question}]},
+            )
+            parts = []
+            for item in result.get("output", []):
+                if item.get("type") == "message":
+                    for block in item.get("content", []):
+                        if block.get("type") == "output_text":
+                            parts.append(block.get("text", ""))
+            return "".join(parts)
+        except Exception as e:
+            if "429" in str(e) or "REQUEST_LIMIT_EXCEEDED" in str(e):
+                wait = 2 ** (attempt + 1)
+                print(f"Rate limited, retrying in {wait}s... (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait)
+            else:
+                raise
+    raise RuntimeError(f"Failed after {max_retries} retries due to rate limiting")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Results Summary
+# MAGIC ## Define Custom Scorers
 
 # COMMAND ----------
 
-import pandas as pd
+import re
+from mlflow.genai.scorers import scorer
 
-results_df = pd.DataFrame(results)
+@scorer
+def non_empty(outputs: str) -> bool:
+    """Checks the agent returned a substantive answer, not empty or a refusal."""
+    if not outputs or not outputs.strip():
+        return False
+    refusal_phrases = [
+        "i wasn't able to find",
+        "i don't have enough information",
+        "i cannot answer",
+        "no relevant information",
+    ]
+    lower = outputs.lower()
+    return not any(phrase in lower for phrase in refusal_phrases)
 
-total = len(results_df)
-success = len(results_df[results_df["status"] == "success"])
-errors = len(results_df[results_df["status"] == "error"])
-avg_latency = results_df[results_df["status"] == "success"]["latency_s"].mean()
 
-print("=" * 60)
-print("TEST RESULTS SUMMARY")
-print("=" * 60)
-print(f"Total tests:     {total}")
-print(f"Successful:      {success}")
-print(f"Errors:          {errors}")
-print(f"Avg latency:     {avg_latency:.1f}s")
-print("=" * 60)
-
-display(results_df)
+@scorer
+def contains_data(outputs: str) -> bool:
+    """Checks the response includes numerical data (numbers, percentages, currency)."""
+    if not outputs:
+        return False
+    return bool(re.search(r"\d+[\.,]?\d*[%$]?", outputs))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Results by Domain
+# MAGIC ## Run Evaluation
+# MAGIC
+# MAGIC Uses `mlflow.genai.evaluate()` with:
+# MAGIC - **Correctness**: LLM judge that checks semantic match against `expected_response`
+# MAGIC - **Guidelines (relevance)**: LLM judge that checks the answer is on-topic
+# MAGIC - **Guidelines (no_hallucination)**: LLM judge that checks for fabricated claims
+# MAGIC - **non_empty**: Code scorer that rejects empty or refusal responses
+# MAGIC - **contains_data**: Code scorer that verifies numerical data is present
 
 # COMMAND ----------
 
-domain_summary = (
-    results_df.groupby("domain")
-    .agg(
-        tests=("status", "count"),
-        successes=("status", lambda x: (x == "success").sum()),
-        avg_latency=("latency_s", "mean"),
-    )
-    .reset_index()
+from mlflow.genai.scorers import Correctness, Guidelines
+
+eval_results = mlflow.genai.evaluate(
+    data=eval_dataset,
+    predict_fn=predict_fn,
+    scorers=[
+        Correctness(),
+        Guidelines(
+            name="relevance",
+            guidelines=(
+                "The response must directly answer the user's question. "
+                "It should not provide information about an unrelated topic."
+            ),
+        ),
+        Guidelines(
+            name="no_hallucination",
+            guidelines=(
+                "The response must only present data that could plausibly come "
+                "from the underlying database. It should not fabricate specific "
+                "numbers or claim to have data it cannot access."
+            ),
+        ),
+        non_empty,
+        contains_data,
+    ],
 )
 
-display(domain_summary)
-
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Verify MLflow Traces
+# MAGIC ## Evaluation Results
+# MAGIC
+# MAGIC Results are logged as an MLflow evaluation run. Open the experiment in the
+# MAGIC MLflow UI to see per-row scores, LLM judge rationales, and aggregated metrics.
 
 # COMMAND ----------
 
-print(f"\nTo inspect traces, navigate to the MLflow experiment:")
+print("Evaluation complete.")
 if EXPERIMENT_NAME:
     print(f"  Experiment: {EXPERIMENT_NAME}")
-print(f"  Endpoint: {ENDPOINT_NAME}")
-print("\nLook for:")
-print("  - 'supervisor' spans showing routing decisions")
-print("  - 'SalesAgent', 'HRAgent', 'SupplyChainAgent' spans")
-print("  - 'final_answer' spans with synthesized responses")
+print(f"  Endpoint:   {ENDPOINT_NAME}")
+
+try:
+    print("\nAggregated metrics:")
+    for k, v in eval_results.metrics.items():
+        print(f"  {k}: {v}")
+except AttributeError:
+    print("\nView detailed results in the MLflow experiment UI (Traces tab).")

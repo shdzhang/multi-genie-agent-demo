@@ -34,14 +34,10 @@ targets:
     mode: development
     default: true
     workspace:
-      host: https://416411475796958.8.gcp.databricks.com/
-
-  staging:
-    workspace:
-      host: https://416411475796958.8.gcp.databricks.com/
+      profile: azure-szwestus-stable
 
   prod:
     mode: production
     workspace:
-      host: https://416411475796958.8.gcp.databricks.com/
+      profile: fe-prod-dbx-ws
       root_path: /Workspace/Users/shidong.zhang@databricks.com/.bundle/${bundle.name}/${bundle.target}

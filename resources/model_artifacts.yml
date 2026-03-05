@@ -8,7 +8,7 @@ resources:
   registered_models:
     multi_genie_supervisor:
       catalog_name: ${var.catalog_name}
-      schema_name: ${var.schema_name}
+      schema_name: ${resources.schemas.demo_schema.name}
       name: ${var.model_name}
       comment: "Multi-Genie supervisor agent with OBO authentication"
 

@@ -12,9 +12,9 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("catalog_name", "shidong_catalog")
-dbutils.widgets.text("schema_name", "multi_genie_demo")
-dbutils.widgets.text("model_name", "multi_genie_supervisor")
+dbutils.widgets.text("catalog_name", "")
+dbutils.widgets.text("schema_name", "")
+dbutils.widgets.text("model_name", "")
 dbutils.widgets.text("experiment_name", "")
 
 CATALOG = dbutils.widgets.get("catalog_name")

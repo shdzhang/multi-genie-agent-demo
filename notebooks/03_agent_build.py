@@ -11,10 +11,10 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("catalog_name", "shidong_catalog")
-dbutils.widgets.text("schema_name", "multi_genie_demo")
-dbutils.widgets.text("model_name", "multi_genie_supervisor")
-dbutils.widgets.text("llm_endpoint", "databricks-claude-sonnet-4-5")
+dbutils.widgets.text("catalog_name", "")
+dbutils.widgets.text("schema_name", "")
+dbutils.widgets.text("model_name", "")
+dbutils.widgets.text("llm_endpoint", "")
 dbutils.widgets.text("experiment_name", "")
 
 CATALOG = dbutils.widgets.get("catalog_name")

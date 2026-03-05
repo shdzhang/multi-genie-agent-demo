@@ -14,8 +14,8 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("catalog_name", "shidong_catalog")
-dbutils.widgets.text("schema_name", "multi_genie_demo")
+dbutils.widgets.text("catalog_name", "")
+dbutils.widgets.text("schema_name", "")
 dbutils.widgets.text("warehouse_id", "")
 
 CATALOG = dbutils.widgets.get("catalog_name")

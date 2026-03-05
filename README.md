@@ -39,7 +39,7 @@ This demo uses **OBO (on-behalf-of-user)** rather than a shared PAT:
 |--------|-------------|------------------|
 | Auth init | `w.tokens.create()` at module level | `ModelServingUserCredentials()` inside `predict()` |
 | Security | Shared token, no per-user ACLs | Per-user downscoped tokens, UC ACLs enforced |
-| MLflow logging | `resources=[DatabricksGenieSpace(...)]` | `auth_policy=AuthPolicy(user_auth_policy=...)` |
+| MLflow logging | `resources=[DatabricksGenieSpace(...)]` | `auth_policy=AuthPolicy(system_auth_policy=..., user_auth_policy=...)` |
 | Deployment | `environment_vars={"DATABRICKS_GENIE_PAT": ...}` | No env vars needed |
 
 ## Prerequisites
@@ -52,11 +52,11 @@ This demo uses **OBO (on-behalf-of-user)** rather than a shared PAT:
 ## Quick Start
 
 ```bash
-# 1. Deploy the bundle
-databricks bundle deploy -t dev
+# 1. Deploy the bundle (creates schema, registered model, experiment, and job)
+databricks bundle deploy -t dev -p <your-profile>
 
 # 2. Run the full end-to-end pipeline (data → Genie spaces → agent → deploy → test)
-databricks bundle run demo -t dev
+databricks bundle run demo -t dev -p <your-profile>
 ```
 
 ## Project Structure
@@ -71,7 +71,7 @@ multi-genie-agent-demo/
 │   ├── 01_setup_data.py              # Create catalog/schema, generate 12 tables
 │   ├── 02_create_genie_spaces.py     # Create 3 Genie spaces via REST API
 │   ├── 03_agent_build.py             # Log multi-agent to MLflow with AuthPolicy
-│   ├── 04_deploy_agent.py            # Register in UC, deploy endpoint
+│   ├── 04_deploy_agent.py            # Deploy to Model Serving endpoint
 │   └── 05_test_and_evaluate.py       # E2E testing across all 3 domains
 ├── agent/
 │   └── multi_agent_supervisor.py     # LangGraph + OBO agent code

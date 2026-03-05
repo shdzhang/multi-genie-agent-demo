@@ -301,15 +301,15 @@ class MultiGenieAgentSupervisor(ResponsesAgent):
             [i.model_dump() for i in request.input]
         )
 
+        def _mid(m):
+            return getattr(m, "id", None) or id(m)
+
         first_message = True
         seen_ids = set()
 
         for _, events in graph.stream(
             {"messages": messages}, stream_mode=["updates"]
         ):
-            def _mid(m):
-                return getattr(m, "id", None) or id(m)
-
             new_msgs = [
                 msg
                 for v in events.values()
